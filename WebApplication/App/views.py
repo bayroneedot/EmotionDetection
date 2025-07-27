@@ -211,93 +211,52 @@ class FileView(views.APIView):
         return check
 
 
-class Predict(views.APIView):
-    """
-    This class is used to making predictions.
-
-    Example of input:
-    {'filename': '01-01-01-01-01-01-01.wav'}
-
-    Example of output:
-    [['neutral']]
-    """
-
-    template_name = 'index.html'
-    # Removing the line below shows the APIview instead of the template.
-    renderer_classes = [TemplateHTMLRenderer]
+class Predict(APIView):
+    parser_classes = (MultiPartParser, FormParser)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        model_name = 'Emotion_Voice_Detection_Model.h5'
-        self.graph = tf.get_default_graph()
-        self.loaded_model = keras.models.load_model(os.path.join(settings.MODEL_ROOT, model_name))
-        self.predictions = []
+        model_path = os.path.join(settings.MODEL_ROOT, 'Emotion_Voice_Detection_Model.h5')
+        self.model = load_model(model_path)
 
-    def file_elaboration(self, filepath):
-        """
-        This function is used to elaborate the file used for the predictions with librosa.
-        :param filepath:
-        :return: predictions
-        """
-        data, sampling_rate = librosa.load(filepath)
-   
+    def post(self, request, format=None):
+        audio_file = request.FILES.get('file', None)
+        if not audio_file:
+            return Response({'error': 'No audio file provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Save the uploaded file temporarily
+        tmp_path = os.path.join(settings.MEDIA_ROOT, audio_file.name)
+        with open(tmp_path, 'wb+') as temp_file:
+            for chunk in audio_file.chunks():
+                temp_file.write(chunk)
+
         try:
-            mfccs = np.mean(librosa.feature.mfcc(y=data, sr=sampling_rate,
-                                                    n_mfcc=40).T, axis=0)
-            training_data = np.expand_dims(mfccs, axis=2)
-            training_data_expanded = np.expand_dims(training_data, axis=0)
-            numpred = self.loaded_model.predict_classes(training_data_expanded)
-            self.predictions.append([self.classtoemotion(numpred)])
-            return self.predictions
+            data, sampling_rate = librosa.load(tmp_path, sr=None)
+            mfccs = np.mean(librosa.feature.mfcc(y=data, sr=sampling_rate, n_mfcc=40).T, axis=0)
+            features = np.expand_dims(mfccs, axis=2)
+            features = np.expand_dims(features, axis=0)
+            preds = self.model.predict(features)
+            predicted_class = np.argmax(preds, axis=1)[0]
+            emotion_label = self.classtoemotion(predicted_class)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        finally:
+            # Clean up the temp file
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
-        except ValueError as err:
-             return Response(str(err), status=status.HTTP_400_BAD_REQUEST)
-            
-
-    def post(self, request):
-        """
-        This method is used to making predictions on audio files
-        loaded with FileView.post
-        """
-        with self.graph.as_default():
-            filename = request.POST.getlist('file_name').pop()
-            filepath = str(os.path.join(settings.MEDIA_ROOT, filename))
-            print("in post",filepath)
-            predictions = self.file_elaboration(filepath)
-            # print("checkpoint1")
-            # for prediction in predictions:
-                # print(prediction)
-            # print("checkpoint3")
-            try:
-                if type(predictions) == list:
-                    return Response({'predictions': predictions.pop()}, status=status.HTTP_200_OK)
-                else:
-                    return Response(predictions, status=status.HTTP_400_BAD_REQUEST)
-
-            except ValueError as err:
-                return Response(str(err), status=status.HTTP_400_BAD_REQUEST)
+        return Response({'prediction': emotion_label}, status=status.HTTP_200_OK)
 
     @staticmethod
     def classtoemotion(pred):
-        """
-        This method is used to convert the predictions (int) into human readable strings.
-        ::pred:: An int from 0 to 7.
-        ::output:: A string label
-
-        Example:
-        classtoemotion(0) == neutral
-        """
-
-        label_conversion = {'0': 'neutral',
-                            '1': 'calm',
-                            '2': 'happy',
-                            '3': 'sad',
-                            '4': 'angry',
-                            '5': 'fearful',
-                            '6': 'disgust',
-                            '7': 'surprised'}
-
-        for key, value in label_conversion.items():
-            if int(key) == pred:
-                label = value
-        return label
+        label_map = {
+            0: 'neutral',
+            1: 'calm',
+            2: 'happy',
+            3: 'sad',
+            4: 'angry',
+            5: 'fearful',
+            6: 'disgust',
+            7: 'surprised'
+        }
+        return label_map.get(pred, 'unknown')
